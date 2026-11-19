@@ -43,7 +43,7 @@ from reportlab.pdfgen import canvas
 # ================================================================
 # 2. CONFIGURAÇÕES E CONSTANTES
 # ================================================================
-VERSAO = "1.2.0"
+VERSAO = "1.2.1"
 NOME_APP = "GeradorGuiasCASSI"
 TITULO_APP = "GERADOR DE GUIAS CASSI"
 CONTRATADO = "Recriar Clínica Psicopedagogica"
@@ -1287,9 +1287,10 @@ def iniciar_interface():
         )
 
     api = DashboardAPI()
+    LOGGER.info("Iniciando PyWebView %s com HTML local: %s", getattr(webview, "__version__", "desconhecida"), html_path.resolve())
     janela = webview.create_window(
         "Gerador de Guias CASSI",
-        html_path.resolve().as_uri(),
+        str(html_path.resolve()),
         js_api=api,
         width=1440,
         height=960,
@@ -1298,7 +1299,7 @@ def iniciar_interface():
         text_select=True,
     )
     api.window = janela
-    webview.start(debug=False, http_server=False)
+    webview.start(debug=False, http_server=True)
 
 
 

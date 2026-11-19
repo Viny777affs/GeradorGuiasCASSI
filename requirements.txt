@@ -1,7 +1,7 @@
 # Dependências Python do painel e do processamento PDF
 pypdf>=5.0.0
 reportlab>=4.2.0
-pywebview>=5.0.0
+pywebview==6.2.1
 
 # Dependências específicas para o backend Windows do PyWebView
 pythonnet>=3.0.0; sys_platform == "win32"
