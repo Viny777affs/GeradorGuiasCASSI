@@ -1,0 +1,100 @@
+
+name: Build Windows EXE e publicar Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Baixar codigo do repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Baixar e validar WebView2
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force runtime
+          Invoke-WebRequest `
+            -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" `
+            -OutFile "runtime\MicrosoftEdgeWebView2Setup.exe"
+
+          $sig = Get-AuthenticodeSignature "runtime\MicrosoftEdgeWebView2Setup.exe"
+
+          if ($sig.Status -ne "Valid" -or
+              $sig.SignerCertificate.Subject -notmatch "Microsoft Corporation") {
+            throw "Assinatura do instalador WebView2 invalida."
+          }
+
+      - name: Gerar executavel
+        shell: pwsh
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --onefile `
+            --windowed `
+            --name GeradorGuiasCASSI `
+            --add-data "interface.html;." `
+            --add-data "runtime\MicrosoftEdgeWebView2Setup.exe;runtime" `
+            --collect-all webview `
+            --collect-all pythonnet `
+            --collect-all clr_loader `
+            --hidden-import clr `
+            --hidden-import webview.platforms.edgechromium `
+            gerar_guias.py
+
+      - name: Preparar pacote para download
+        shell: pwsh
+        run: |
+          $versao = $env:GITHUB_REF_NAME
+          $nome = "GeradorGuiasCASSI-Windows-x64-$versao"
+
+          New-Item -ItemType Directory -Force pacote
+
+          Copy-Item "dist\GeradorGuiasCASSI.exe" "pacote\"
+          Copy-Item "README_CLIENTE.txt" "pacote\"
+
+          Compress-Archive `
+            -Path "pacote\*" `
+            -DestinationPath "$nome.zip" `
+            -Force
+
+          $hash = Get-FileHash "$nome.zip" -Algorithm SHA256
+          "$($hash.Hash)  $nome.zip" | Set-Content "$nome.zip.sha256"
+
+      - name: Guardar pacote compilado
+        uses: actions/upload-artifact@v4
+        with:
+          name: GeradorGuiasCASSI-Windows-x64
+          path: |
+            GeradorGuiasCASSI-Windows-x64-*.zip
+            GeradorGuiasCASSI-Windows-x64-*.zip.sha256
+
+      - name: Publicar Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Gerador de Guias CASSI ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            GeradorGuiasCASSI-Windows-x64-*.zip
+            GeradorGuiasCASSI-Windows-x64-*.zip.sha256
