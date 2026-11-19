@@ -1,0 +1,110 @@
+name: Build Windows EXE e publicar Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Compilar GeradorGuiasCASSI para Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Baixar código do repositório
+        uses: actions/checkout@v4
+
+      - name: Preparar Python 3.11 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Instalar dependências de compilação
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Validar sintaxe Python
+        shell: pwsh
+        run: python -m py_compile gerar_guias.py
+
+      - name: Baixar bootstrapper oficial do Microsoft WebView2
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path runtime | Out-Null
+          $installer = Join-Path $PWD 'runtime\MicrosoftEdgeWebView2Setup.exe'
+          Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $installer
+          if ((Get-Item $installer).Length -lt 100000) {
+            throw 'O instalador WebView2 baixado parece incompleto.'
+          }
+          $signature = Get-AuthenticodeSignature -FilePath $installer
+          if ($signature.Status -ne 'Valid') {
+            throw "Assinatura Authenticode do instalador WebView2 inválida: $($signature.Status)"
+          }
+
+      - name: Compilar executável independente
+        shell: pwsh
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --onefile `
+            --windowed `
+            --name GeradorGuiasCASSI `
+            --add-data 'interface.html;.' `
+            --add-data 'runtime\MicrosoftEdgeWebView2Setup.exe;runtime' `
+            --collect-all webview `
+            --collect-all pythonnet `
+            --collect-all clr_loader `
+            --hidden-import clr `
+            --hidden-import webview.platforms.edgechromium `
+            gerar_guias.py
+
+      - name: Montar pacote pronto para a clínica
+        shell: pwsh
+        run: |
+          $versionLine = Select-String -Path 'gerar_guias.py' -Pattern '^VERSAO\s*=\s*"([^"]+)"'
+          $version = $versionLine.Matches[0].Groups[1].Value
+          $package = "GeradorGuiasCASSI-Windows-x64-v$version"
+          $stage = Join-Path $PWD "dist\$package"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item 'dist\GeradorGuiasCASSI.exe' $stage
+          Copy-Item 'README_CLIENTE.txt' $stage
+          $zip = Join-Path $PWD "dist\$package.zip"
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal
+          $hash = (Get-FileHash -Path $zip -Algorithm SHA256).Hash
+          Set-Content -Path "$zip.sha256" -Value "$hash  $package.zip" -Encoding ascii
+          "PACKAGE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PACKAGE_ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Disponibilizar artefatos de compilação
+        uses: actions/upload-artifact@v4
+        with:
+          name: GeradorGuiasCASSI-Windows-x64-${{ env.PACKAGE_VERSION }}
+          path: |
+            dist/GeradorGuiasCASSI.exe
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publicar na aba Releases do GitHub
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Gerador de Guias CASSI v${{ env.PACKAGE_VERSION }}
+          generate_release_notes: true
+          files: |
+            dist/GeradorGuiasCASSI.exe
+            dist/*.zip
+            dist/*.sha256
+          fail_on_unmatched_files: true

@@ -1,0 +1,5 @@
+O modelo oficial da guia CASSI deve ser selecionado dentro do aplicativo:
+Configurações > Modelo oficial da guia > Selecionar PDF.
+
+Não é necessário colocar o modelo nesta pasta nem recompilar o aplicativo.
+O PDF selecionado é copiado para a pasta de dados do usuário no Windows.
