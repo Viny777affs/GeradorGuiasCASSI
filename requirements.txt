@@ -1,0 +1,11 @@
+# Dependências Python do painel e do processamento PDF
+pypdf>=5.0.0
+reportlab>=4.2.0
+pywebview>=5.0.0
+
+# Dependências específicas para o backend Windows do PyWebView
+pythonnet>=3.0.0; sys_platform == "win32"
+clr_loader>=0.2.0; sys_platform == "win32"
+
+# Compilação do executável no computador de desenvolvimento ou GitHub Actions
+pyinstaller>=6.0.0

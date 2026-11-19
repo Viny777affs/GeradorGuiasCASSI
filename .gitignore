@@ -1,0 +1,31 @@
+# Ambiente Python e cache
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Saída de build
+build/
+dist/
+*.spec
+
+# Configurações e dados locais (não publicar dados da clínica/pacientes)
+config.json
+historico.json
+*.log
+entrada/
+saida/
+logs/
+
+# PDFs reais: modelo e protocolos devem ser escolhidos localmente no aplicativo
+modelo/*.pdf
+*.pdf
+
+# Instalador do WebView2 é baixado durante o build do GitHub Actions
+runtime/
+
+# Arquivos temporários e segredos
+*.tmp
+.env
+.env.*
+secrets.*
