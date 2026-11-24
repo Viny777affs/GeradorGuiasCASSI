@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from pypdf import PdfReader, PdfWriter
+from pypdf.generic import NameObject, NumberObject, RectangleObject
 from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen import canvas
 
@@ -83,6 +84,8 @@ DESCRICOES = {
     "81040024": "Sessão de Fonoaudiologia",
     "81020016": "Psicoterapia pelo o método ABA",
     "81030037": "Sessão de psicoterapia",
+    "81050097": "Paralisia Cerebral Motora",
+    "81030010": "Sessão de Psicomotricidade",
 }
 
 # Caminhos de recursos (somente leitura) e dados persistentes (graváveis).
@@ -275,12 +278,13 @@ def caminho_modelo(config: dict | None = None) -> Path | None:
 
 
 def inspecionar_modelo(arquivo: Path, validar_dimensoes: bool = True) -> dict:
-    """Confere integridade e tamanho do formulário esperado pelo posicionamento atual."""
+    """Confere integridade, dimensões A4 paisagem e rotação do formulário."""
     arquivo = Path(arquivo).expanduser().resolve()
     if not arquivo.is_file() or arquivo.suffix.lower() != ".pdf":
         raise ValueError("Selecione um arquivo PDF existente para usar como modelo.")
     if arquivo.stat().st_size <= 0:
         raise ValueError("O arquivo do modelo está vazio.")
+
     leitor = PdfReader(str(arquivo), strict=False)
     if leitor.is_encrypted:
         try:
@@ -291,21 +295,33 @@ def inspecionar_modelo(arquivo: Path, validar_dimensoes: bool = True) -> dict:
             raise ValueError("O PDF modelo está protegido por senha e não pode ser utilizado.")
     if not leitor.pages:
         raise ValueError("O PDF selecionado não possui páginas.")
+
     pagina = leitor.pages[0]
     largura = float(pagina.mediabox.width)
     altura = float(pagina.mediabox.height)
+    rotacao = int(pagina.get("/Rotate", 0) or 0) % 360
+
     if validar_dimensoes and (abs(largura - PAGE_W) > 5 or abs(altura - PAGE_H) > 5):
         raise ValueError(
             "O tamanho da primeira página do modelo não corresponde ao formulário esperado. "
             f"Encontrado: {largura:.1f} × {altura:.1f} pt; esperado aproximadamente: "
             f"{PAGE_W} × {PAGE_H} pt (A4 paisagem). Selecione o modelo oficial usado pelo script original."
         )
+    if validar_dimensoes and rotacao in (90, 270):
+        raise ValueError(
+            f"O PDF modelo possui rotação interna de {rotacao}°. "
+            "Embora o tamanho informado seja A4 paisagem, essa rotação faz alguns leitores "
+            "e impressoras interpretarem a página como retrato. Salve o formulário sem rotação "
+            "(A4 paisagem, rotação 0°) e selecione-o novamente."
+        )
+
     return {
         "path": str(arquivo),
         "name": arquivo.name,
         "pages": len(leitor.pages),
         "width": round(largura, 1),
         "height": round(altura, 1),
+        "rotation": rotacao,
         "size_bytes": arquivo.stat().st_size,
     }
 
@@ -481,40 +497,70 @@ def data_br(valor: str) -> str:
 def desenhar_texto_ajustado(
     c: canvas.Canvas, x: float, y: float, texto: str,
     tamanho: float = 10, largura_max: float = 100, tamanho_min: float = 5.5,
+    margem_seguranca: float = 3.0,
 ) -> None:
-    """Dimensiona o texto para permanecer dentro da largura definida do campo."""
+    """Dimensiona o texto para permanecer dentro da largura definida do campo.
+
+    Reserva uma pequena margem de segurança antes do limite informado e, se mesmo
+    assim o texto não couber na fonte mínima, corta com reticências — para nunca
+    invadir visualmente o campo vizinho nem travar a geração da guia inteira.
+    """
     texto = re.sub(r"\s+", " ", str(texto or "")).strip()
     if not texto:
         return
     fonte = "Helvetica"
+    largura_disponivel = max(float(largura_max) - margem_seguranca, 1.0)
     tamanho_atual = float(tamanho)
     largura = stringWidth(texto, fonte, tamanho_atual)
-    while largura > largura_max and tamanho_atual > tamanho_min:
+    while largura > largura_disponivel and tamanho_atual > tamanho_min:
         tamanho_atual = max(tamanho_min, tamanho_atual - 0.25)
         largura = stringWidth(texto, fonte, tamanho_atual)
-    if largura > largura_max:
-        raise ValueError(
-            "Texto não cabe no campo do formulário mesmo com a fonte mínima "
-            f"({tamanho_min:g} pt). Ajuste os dados antes de emitir: {texto[:80]}"
-        )
+    if largura > largura_disponivel:
+        tamanho_atual = tamanho_min
+        reticencias = "…"
+        cortado = texto
+        while cortado and stringWidth(cortado + reticencias, fonte, tamanho_atual) > largura_disponivel:
+            cortado = cortado[:-1]
+        texto = (cortado + reticencias) if cortado else texto[0]
     c.setFont(fonte, tamanho_atual)
     c.drawString(x, PAGE_H - y, texto)
 
 
 def camada(dados: dict, cnpj: str, eventos: list[dict] | None = None):
-    """Cria a camada de preenchimento para todos os eventos ou para um evento isolado."""
+    """Cria a camada de preenchimento calibrada para o modelo CASSI enviado."""
     eventos = dados["eventos"] if eventos is None else eventos
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=(PAGE_W, PAGE_H))
 
-    desenhar_texto_ajustado(c, 392, 72, data_br(dados["resposta"] or dados["inicio"]), 10, 62)
-    desenhar_texto_ajustado(c, 462, 72, dados["autorizacao"], 10, 165)
-    desenhar_texto_ajustado(c, 640, 72, dados["fim"], 10, 180)
-    desenhar_texto_ajustado(c, 52, 106, dados["carteira"], 11, 395)
-    desenhar_texto_ajustado(c, 462, 106, dados["nome"], 11, 355)
-    desenhar_texto_ajustado(c, 42, 137, cnpj, 11, 195)
-    desenhar_texto_ajustado(c, 250, 137, CONTRATADO, 10, 570)
+    # Linha superior: campos 4 (data), 5 (senha/autorização) e 6 (validade).
+    desenhar_texto_ajustado(
+        c, 373, 72, data_br(dados["resposta"] or dados["inicio"]),
+        10, 66, tamanho_min=7.5,
+    )
+    desenhar_texto_ajustado(
+        c, 448, 72, dados["autorizacao"], 10, 166, tamanho_min=7.5,
+    )
+    desenhar_texto_ajustado(
+        c, 631, 72, dados["fim"], 10, 72, tamanho_min=7.5,
+    )
 
+    # Dados do beneficiário: campos 8 (carteira) e 11 (nome).
+    desenhar_texto_ajustado(
+        c, 32, 106, dados["carteira"], 11, 147, tamanho_min=7.5,
+    )
+    desenhar_texto_ajustado(
+        c, 417, 106, dados["nome"], 11, 247, tamanho_min=7.0,
+    )
+
+    # Dados do contratante: campos 13 (CNPJ) e 14 (nome do contratado).
+    desenhar_texto_ajustado(
+        c, 34, 137, cnpj, 11, 196, tamanho_min=7.5,
+    )
+    desenhar_texto_ajustado(
+        c, 242, 137, CONTRATADO, 10, 310, tamanho_min=7.0,
+    )
+
+    # Procedimentos solicitados: as coordenadas originais destas linhas foram mantidas.
     linhas_y = [223, 235, 246.5, 258, 270]
     for y, evento in zip(linhas_y, eventos[:5]):
         codigo = evento["codigo"]
@@ -531,20 +577,50 @@ def camada(dados: dict, cnpj: str, eventos: list[dict] | None = None):
 
 
 def modelo_limpo(modelo_pdf: Path | str | None = None):
-    """Abre a primeira página do modelo selecionado, sem alterar o arquivo original."""
+    """Abre o formulário e padroniza suas caixas físicas para A4 paisagem."""
     caminho = Path(modelo_pdf).expanduser() if modelo_pdf else caminho_modelo()
     if caminho is None or not caminho.exists():
         raise FileNotFoundError(
             "Modelo PDF não configurado. Acesse Configurações > Modelo oficial da guia "
             "e selecione o formulário da CASSI."
         )
+
     inspecionar_modelo(caminho, validar_dimensoes=True)
-    leitor = PdfReader(str(caminho))
+    leitor = PdfReader(str(caminho), strict=False)
     if not leitor.pages:
         raise ValueError("O PDF modelo não possui páginas.")
+
     pagina = leitor.pages[0]
     if "/Annots" in pagina:
         del pagina["/Annots"]
+
+    # Rotação de 90°/270° já é bloqueada na inspeção. Para 180°, gravamos a
+    # orientação no conteúdo e removemos a rotação interna do PDF.
+    rotacao = int(pagina.get("/Rotate", 0) or 0) % 360
+    if rotacao == 180:
+        pagina.transfer_rotation_to_content()
+    elif rotacao in (90, 270):
+        raise ValueError(
+            f"O modelo possui rotação de {rotacao}°. Selecione um PDF A4 paisagem sem rotação."
+        )
+
+    largura = float(pagina.mediabox.width)
+    altura = float(pagina.mediabox.height)
+    if abs(largura - PAGE_W) > 5 or abs(altura - PAGE_H) > 5 or largura <= altura:
+        raise ValueError(
+            "O modelo não pôde ser normalizado para A4 paisagem. "
+            f"Dimensões encontradas: {largura:.1f} × {altura:.1f} pt; "
+            f"esperado: {PAGE_W} × {PAGE_H} pt."
+        )
+
+    # Alinha MediaBox, CropBox, TrimBox, BleedBox e ArtBox ao mesmo A4 paisagem.
+    caixa = RectangleObject((0, 0, PAGE_W, PAGE_H))
+    pagina.mediabox = caixa
+    pagina.cropbox = RectangleObject((0, 0, PAGE_W, PAGE_H))
+    pagina.trimbox = RectangleObject((0, 0, PAGE_W, PAGE_H))
+    pagina.bleedbox = RectangleObject((0, 0, PAGE_W, PAGE_H))
+    pagina.artbox = RectangleObject((0, 0, PAGE_W, PAGE_H))
+    pagina[NameObject("/Rotate")] = NumberObject(0)
     return pagina
 
 
@@ -566,6 +642,7 @@ def nome_seguro(texto: str) -> str:
 
 
 def salvar_pdf(escritor: PdfWriter, destino: Path) -> Path:
+    """Salva sem sobrescrever e valida a orientação real do PDF gravado."""
     destino.parent.mkdir(parents=True, exist_ok=True)
     destino = caminho_unico(destino)
     temporario = destino.with_name(destino.stem + ".tmp" + destino.suffix)
@@ -574,6 +651,33 @@ def salvar_pdf(escritor: PdfWriter, destino: Path) -> Path:
             escritor.write(arquivo)
             arquivo.flush()
             os.fsync(arquivo.fileno())
+
+        # Confere o arquivo já gravado, pois é essa versão que será impressa.
+        leitor_teste = PdfReader(str(temporario), strict=False)
+        if not leitor_teste.pages:
+            raise ValueError("O PDF gerado não contém páginas.")
+
+        caixas = ("mediabox", "cropbox", "trimbox", "bleedbox", "artbox")
+        for numero, pagina in enumerate(leitor_teste.pages, start=1):
+            largura = float(pagina.mediabox.width)
+            altura = float(pagina.mediabox.height)
+            rotacao = int(pagina.get("/Rotate", 0) or 0) % 360
+            dimensoes_ok = abs(largura - PAGE_W) <= 1 and abs(altura - PAGE_H) <= 1
+            caixas_ok = True
+            for nome_caixa in caixas:
+                caixa = getattr(pagina, nome_caixa)
+                valores = tuple(float(valor) for valor in caixa)
+                if len(valores) != 4 or any(abs(a - b) > 1 for a, b in zip(valores, (0, 0, PAGE_W, PAGE_H))):
+                    caixas_ok = False
+                    break
+
+            if not dimensoes_ok or largura <= altura or rotacao != 0 or not caixas_ok:
+                raise ValueError(
+                    f"A página {numero} não foi gravada corretamente em A4 paisagem. "
+                    f"MediaBox: {largura:.1f} × {altura:.1f} pt; rotação: {rotacao}°; "
+                    f"caixas alinhadas: {'sim' if caixas_ok else 'não'}."
+                )
+
         temporario.replace(destino)
     except Exception:
         try:
@@ -607,6 +711,7 @@ def gerar_guia(
         for _ in dados["eventos"]:
             escritor.add_page(modelo_limpo(modelo_pdf))
             escritor.pages[-1].merge_page(camada_completa)
+            escritor.pages[-1][NameObject("/Rotate")] = NumberObject(0)
         destino = saida_destino / f"GUIA_{nome}_{autorizacao}.pdf"
         arquivos_gerados.append(salvar_pdf(escritor, destino))
 
@@ -616,6 +721,7 @@ def gerar_guia(
             escritor = PdfWriter()
             escritor.add_page(modelo_limpo(modelo_pdf))
             escritor.pages[0].merge_page(camada(dados, cnpj, [evento]))
+            escritor.pages[0][NameObject("/Rotate")] = NumberObject(0)
             descricao = nome_seguro(DESCRICOES[evento["codigo"]])
             codigo = nome_seguro(evento["codigo"])
             destino = saida_destino / f"GUIA_{nome}_{autorizacao}_{codigo}_{descricao}.pdf"
